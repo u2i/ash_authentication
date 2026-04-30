@@ -11,6 +11,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v5.0.0-rc.5](https://github.com/team-alembic/ash_authentication/compare/v5.0.0-rc.4...v5.0.0-rc.5) (2026-04-30)
+
+
+
+
+### Bug Fixes:
+
+* gracefully degrade row locks on data layers without lock support (#1158) by James Harton
+
 ## [v5.0.0-rc.4](https://github.com/team-alembic/ash_authentication/compare/v5.0.0-rc.3...v5.0.0-rc.4) (2026-04-30)
 
 
