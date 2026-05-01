@@ -161,6 +161,7 @@ defmodule AshAuthentication.Strategy.MagicLink.Transformer do
   end
 
   defp build_lookup_action(dsl_state, strategy) do
+    import Ash.Expr
     identity_attribute = Resource.Info.attribute(dsl_state, strategy.identity_field)
 
     arguments = [
@@ -172,13 +173,21 @@ defmodule AshAuthentication.Strategy.MagicLink.Transformer do
       )
     ]
 
-    Transformer.build_entity(Resource.Dsl, [:actions], :read,
-      name: strategy.lookup_action_name,
-      arguments: arguments,
-      get_by: [strategy.identity_field],
-      get?: true,
-      description: "Look up a user by #{strategy.identity_field}."
-    )
+    field = strategy.identity_field
+
+    case Transformer.build_entity(Resource.Dsl, [:actions], :read,
+           name: strategy.lookup_action_name,
+           arguments: arguments,
+           get_by: [field],
+           get?: true,
+           description: "Look up a user by #{strategy.identity_field}."
+         ) do
+      {:ok, action} ->
+        {:ok, %{action | filter: expr(^ref(field) == ^arg(field))}}
+
+      {:error, _} = error ->
+        error
+    end
   end
 
   defp build_request_action(dsl_state, strategy) do
