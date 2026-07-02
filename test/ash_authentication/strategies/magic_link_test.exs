@@ -13,6 +13,26 @@ defmodule AshAuthentication.Strategy.MagicLinkTest do
 
   doctest MagicLink
 
+  describe "auto-generated lookup action (get_by_<identity_field>)" do
+    test "is scoped by a filter, even with multiple users present" do
+      strategy = Info.strategy!(Example.User, :magic_link)
+
+      target = build_user()
+      _other = build_user()
+
+      identity_value = Map.fetch!(target, strategy.identity_field)
+
+      assert {:ok, found} =
+               Ash.read_one(
+                 Ash.Query.for_read(Example.User, strategy.lookup_action_name, %{
+                   strategy.identity_field => identity_value
+                 })
+               )
+
+      assert found.id == target.id
+    end
+  end
+
   describe "request_token_for/2" do
     test "it generates a sign in token" do
       user = build_user()
