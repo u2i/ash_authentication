@@ -91,4 +91,44 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
       assert conn.private[:authentication_result] == {:error, nil}
     end
   end
+
+  describe "callback/2 with no session (IdP-initiated)" do
+    test "a stateless GET fails closed when idp_initiated_login? is disabled" do
+      {:ok, strategy} = Info.strategy(Example.User, :oauth2)
+
+      conn =
+        :get
+        |> conn("/user/oauth2/callback", %{"code" => "abc"})
+        |> SessionPipeline.call([])
+        |> Plug.callback(strategy)
+
+      # No request phase ran (no stored session), and the strategy hasn't opted
+      # into IdP-initiated handling, so we must not complete authentication.
+      assert conn.private[:authentication_result] == {:error, nil}
+      refute conn.status == 302
+    end
+
+    test "a stateless GET restarts the request phase when idp_initiated_login? is enabled" do
+      {:ok, strategy} = Info.strategy(Example.User, :oauth2_idp_initiated)
+
+      conn =
+        :get
+        |> conn("/user/oauth2_idp_initiated/callback", %{"code" => "abc"})
+        |> SessionPipeline.call([])
+        |> Plug.callback(strategy)
+
+      # The stateless callback is treated as a trigger: discard the inbound
+      # response and redirect into the request phase (OIDC Core §4), which mints
+      # a fresh `state` in the session for later verification.
+      assert conn.status == 302
+      assert {"location", location} = Enum.find(conn.resp_headers, &(elem(&1, 0) == "location"))
+      assert String.starts_with?(location, "https://example.com/authorize?")
+
+      session = get_session(conn, "user/oauth2_idp_initiated")
+      assert session.state =~ ~r/.+/
+
+      # We did not complete authentication from the inbound `code`.
+      refute match?({:ok, _}, conn.private[:authentication_result])
+    end
+  end
 end

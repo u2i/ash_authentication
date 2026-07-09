@@ -155,6 +155,12 @@ defmodule AshAuthentication.Strategy.OAuth2.Dsl do
             "If enabled, new users will be able to register for your site when authenticating and not already present. If not, only existing users will be able to authenticate.",
           default: true
         ],
+        idp_initiated_login?: [
+          type: :boolean,
+          doc:
+            "If enabled, a callback arriving with no stored session (an IdP/third-party-initiated login, e.g. a Clever or ClassLink portal launch that omits `state`) is treated as a *trigger* to restart authentication rather than completed directly. The plug discards the inbound response and redirects into the request phase, where a fresh `state` is generated and later verified — the OpenID Connect Core §4 (\"Initiating Login from a Third Party\") pattern. This keeps CSRF `state` verification intact for all flows. Requires the user to still have a live session at the provider so the restarted flow returns immediately. Defaults to `false` (stateless callbacks fail closed).",
+          default: false
+        ],
         register_action_name: [
           type: :atom,
           doc:
