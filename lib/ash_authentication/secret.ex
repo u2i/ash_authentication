@@ -85,9 +85,9 @@ defmodule AshAuthentication.Secret do
   IdP-initiated login (`idp_initiated_login?`), the context additionally
   carries an `:idp_initiated_user_info` key: the profile fetched from the
   launch (the same map your `register`/`sign_in` action receives as
-  `user_info`). A multi-tenant `authorize_url`/`redirect_uri` secret can read
-  it to route the restart at the launch's tenant. It is absent on every other
-  call, so match it optionally:
+  `user_info`). A multi-tenant `authorize_url` / `redirect_uri` /
+  `idp_initiated_request_url` secret can read it to route the restart at the
+  launch's tenant. It is absent on every other call, so match it optionally:
 
       def secret_for([_, _, _, :authorize_url], _resource, _opts, context) do
         case context do
@@ -95,6 +95,13 @@ defmodule AshAuthentication.Secret do
           _ -> {:ok, @default_authorize_url}
         end
       end
+
+  > #### Context needs a module secret {: .info}
+  >
+  > Only a `Secret` **module** (this `secret_for/4` callback) receives the
+  > `context`. An inline function secret (`authorize_url fn name, resource ->
+  > ... end`) is called with just `name` and `resource` — it never sees
+  > `context`, so tenant-from-context routing must use the module form.
   """
   @callback secret_for(secret_name :: [atom], Resource.t(), keyword, context :: map()) ::
               {:ok, String.t()} | :error

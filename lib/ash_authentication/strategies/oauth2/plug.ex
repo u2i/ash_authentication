@@ -129,7 +129,7 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
         render_interstitial(conn, strategy)
 
       conn.method == "GET" and strategy.idp_initiated_login? and not state_param?(conn) ->
-        request(conn, strategy, idp_initiated_context(conn, strategy))
+        idp_initiated_restart(conn, strategy)
 
       true ->
         store_authentication_result(conn, {:error, nil})
@@ -138,25 +138,56 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
 
   # The IdP-initiated restart re-enters the request phase to mint a verifiable
   # `state`. For a *multi-tenant* provider the request phase must know which
-  # tenant to build an authorize URL for — but on an IdP-initiated launch that
-  # tenant is only knowable from the launch itself (the profile behind the
-  # `code`), which the plain restart never reads.
+  # tenant to serve — but on an IdP-initiated launch that tenant is only
+  # knowable from the launch itself (the profile behind the `code`), which the
+  # plain restart never reads. So, read-only and best-effort, we exchange the
+  # launch's `code` and fetch the profile here, then restart with it available.
   #
-  # So, read-only and best-effort, we exchange the launch's `code` and fetch
-  # the profile *here*, and surface it to the restart's secret-resolution
-  # context as `:idp_initiated_user_info`. A tenant-aware `authorize_url` (or
-  # `redirect_uri`) secret function can then route on it:
+  # Two shapes of tenant routing, depending on where the tenant lives:
   #
-  #     authorize_url fn _secret, %{idp_initiated_user_info: info} ->
-  #       {:ok, tenant_authorize_url(info)}
-  #     end
+  #   * **Same host, per-tenant config.** The profile is surfaced to the
+  #     request phase's secret-resolution context as `:idp_initiated_user_info`,
+  #     so a tenant-aware `authorize_url`/`redirect_uri` secret routes on it:
   #
-  # This mints NO session/token/user — it only informs where the restart's
-  # authorize URL points. On any failure we fall through to a plain restart
-  # (empty context), so a provider that does not need this, or a launch we
-  # cannot pre-resolve, is unaffected. The restarted flow triggers a fresh
-  # authorize → a fresh single-use `code`, so the code consumed here is not
-  # reused.
+  #         authorize_url fn _secret, %{idp_initiated_user_info: info} ->
+  #           {:ok, tenant_authorize_url(info)}
+  #         end
+  #
+  #   * **Per-tenant HOST.** When each tenant lives on its own host (subdomain),
+  #     the restart must run *on that host*, because the `state` session is
+  #     stored by the host that will receive the callback (host-scoped cookies).
+  #     If the strategy resolves an `idp_initiated_request_url` secret from the
+  #     context, we redirect the browser to that host's request-phase route
+  #     instead of restarting inline; that host then runs the normal request
+  #     phase and stores `state` where the callback will read it.
+  #
+  #         idp_initiated_request_url fn _secret, %{idp_initiated_user_info: info} ->
+  #           {:ok, "https://" <> tenant_host(info) <> "/auth/user/oauth2"}
+  #         end
+  #
+  # Either way this mints NO session/token/user — the only thing derived from
+  # the untrusted code is where to restart. On any failure we fall through to a
+  # plain restart, so a provider that needs neither, or a launch we cannot
+  # pre-resolve, is unaffected. The restart triggers a fresh authorize → a
+  # fresh single-use `code`, so the code consumed here is not reused.
+  defp idp_initiated_restart(conn, strategy) do
+    context = idp_initiated_context(conn, strategy)
+
+    case idp_initiated_request_url(strategy, Map.put(context, :conn, conn)) do
+      {:ok, url} when is_binary(url) ->
+        # Cross-host: hand off to the resolved host's request phase, which
+        # stores `state` on the host that will receive the callback.
+        conn
+        |> put_resp_header("location", url)
+        |> send_resp(:found, "Redirecting to #{strategy.name}")
+
+      _ ->
+        # Same host (or no host resolution): restart inline with the launch
+        # profile in context.
+        request(conn, strategy, context)
+    end
+  end
+
   defp idp_initiated_context(conn, strategy) do
     with {:ok, config} <- config_for(strategy, %{conn: conn}),
          {:ok, %{user: user_info}} <-
@@ -164,6 +195,23 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
       %{idp_initiated_user_info: user_info}
     else
       _ -> %{}
+    end
+  end
+
+  # The optional `idp_initiated_request_url` secret. Absent (or non-binary) →
+  # `:none`, and the restart runs inline. Present → the request-phase URL to
+  # redirect the IdP-initiated launch to (typically the same route on the
+  # tenant's own host).
+  defp idp_initiated_request_url(strategy, context) do
+    case Map.get(strategy, :idp_initiated_request_url) do
+      nil ->
+        :none
+
+      _ ->
+        case fetch_secret(strategy, :idp_initiated_request_url, context) do
+          {:ok, url} when is_binary(url) -> {:ok, url}
+          _ -> :none
+        end
     end
   end
 

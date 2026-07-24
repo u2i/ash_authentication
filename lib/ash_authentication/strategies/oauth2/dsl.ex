@@ -29,6 +29,7 @@ defmodule AshAuthentication.Strategy.OAuth2.Dsl do
         :client_id,
         :client_secret,
         :identity_resource,
+        :idp_initiated_request_url,
         :private_key,
         :private_key_id,
         :private_key_path,
@@ -178,6 +179,12 @@ defmodule AshAuthentication.Strategy.OAuth2.Dsl do
           doc:
             "If enabled, a callback arriving with no stored session (an IdP/third-party-initiated login, e.g. an identity provider's app-launcher or portal tile, that omits `state`) is treated as a *trigger* to restart authentication rather than completed directly. The plug discards the inbound response and redirects into the request phase, where a fresh `state` is generated and later verified — the OpenID Connect Core §4 (\"Initiating Login from a Third Party\") pattern. This keeps CSRF `state` verification intact for all flows. Only callbacks that carry no `state` parameter are restarted — one bearing `state` came from a request phase that already ran, so it fails closed rather than bouncing again. Requires the user to still have a live session at the provider so the restarted flow returns immediately. Defaults to `false` (stateless callbacks fail closed).",
           default: false
+        ],
+        idp_initiated_request_url: [
+          type: secret_type,
+          doc:
+            "Optional, and only consulted on an `idp_initiated_login?` restart. When each tenant is served from its own host (e.g. a per-district subdomain), the restart must run *on that host* — the CSRF `state` is stored by the host that will receive the callback, so restarting on the wrong host loses it. Resolve the tenant's request-phase URL from the launch (the context carries `:idp_initiated_user_info`, the launch profile) and the plug redirects the browser there instead of restarting inline; that host then runs the normal request phase. Return `:error`/absent to restart inline (the default). #{secret_doc}",
+          required: false
         ],
         warn_on_missing_identity_resource?: [
           type: :boolean,

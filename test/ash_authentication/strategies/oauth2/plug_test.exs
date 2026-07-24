@@ -223,5 +223,48 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
       assert conn.status == 302
       assert get_session(conn, "user/oauth2_idp_initiated").state =~ ~r/.+/
     end
+
+    test "when idp_initiated_request_url resolves, the restart is handed off to that host" do
+      import Mimic
+
+      {:ok, strategy} = Info.strategy(Example.User, :oauth2_idp_initiated)
+      user_info = %{"id" => "person-123"}
+
+      # Per-tenant HOST: the tenant lives on its own host, so the restart must
+      # run there (host-scoped `state` cookie). The strategy resolves the
+      # tenant's request-phase URL from the launch profile in context. Note
+      # this uses a `Secret` *module* — a context-aware secret must be a module
+      # (`secret_for/4`); an inline function secret never receives context.
+      strategy = %{strategy | idp_initiated_request_url: {__MODULE__.TenantRequestUrlSecret, []}}
+
+      stub(Assent.Strategy.OAuth2, :callback, fn _config, _params ->
+        {:ok, %{user: user_info, token: %{"access_token" => "at"}}}
+      end)
+
+      conn =
+        :get
+        |> conn("/user/oauth2_idp_initiated/callback", %{"code" => "abc"})
+        |> SessionPipeline.call([])
+        |> Plug.callback(strategy)
+
+      # Redirected to the resolved tenant host's request phase — NOT the
+      # authorize endpoint, and NO `state` stored here: the target host runs
+      # the request phase and stores `state` where the callback will read it.
+      assert conn.status == 302
+      assert {"location", location} = Enum.find(conn.resp_headers, &(elem(&1, 0) == "location"))
+      assert location == "https://person-123.example.com/auth/user/oauth2_idp_initiated"
+      assert is_nil(get_session(conn, "user/oauth2_idp_initiated"))
+    end
+  end
+
+  defmodule TenantRequestUrlSecret do
+    @moduledoc false
+    use AshAuthentication.Secret
+
+    @impl true
+    def secret_for(_secret_name, _resource, _opts, %{idp_initiated_user_info: %{"id" => id}}),
+      do: {:ok, "https://#{id}.example.com/auth/user/oauth2_idp_initiated"}
+
+    def secret_for(_secret_name, _resource, _opts, _context), do: :error
   end
 end
