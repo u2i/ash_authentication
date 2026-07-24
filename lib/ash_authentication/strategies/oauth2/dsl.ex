@@ -30,6 +30,7 @@ defmodule AshAuthentication.Strategy.OAuth2.Dsl do
         :client_secret,
         :identity_resource,
         :idp_initiated_request_url,
+        :resolve_idp_initiated_launch?,
         :private_key,
         :private_key_id,
         :private_key_path,
@@ -187,9 +188,15 @@ defmodule AshAuthentication.Strategy.OAuth2.Dsl do
           required: false
         ],
         resolve_idp_initiated_launch?: [
-          type: :boolean,
+          type:
+            {:or,
+             [
+               :boolean,
+               {:spark_function_behaviour, AshAuthentication.Secret,
+                {AshAuthentication.SecretFunction, 2}}
+             ]},
           doc:
-            "If enabled, the `idp_initiated_login?` restart first performs a **read-only** exchange of the launch's `code` and surfaces the profile to the request phase's secret-resolution context as `:idp_initiated_user_info`, so a same-host tenant-aware `authorize_url`/`redirect_uri` secret can route on it. This costs one extra token+profile round-trip on IdP-initiated launches, so it is `false` by default; enable it only when a secret actually reads the launch profile. `idp_initiated_request_url` turns this on implicitly (it is that profile's consumer). Mints no session, token, or user.",
+            "Whether the `idp_initiated_login?` restart should first perform a **read-only** exchange of the launch's `code` and surface the profile to the request phase's secret-resolution context as `:idp_initiated_user_info`, so a same-host tenant-aware `authorize_url`/`redirect_uri` secret can route on it. This costs one extra token+profile round-trip, so it is `false` by default; enable it only when a secret actually reads the launch profile. May be a boolean, or — to decide per request (e.g. only when the host carries no tenant) — a `Secret` **module** resolved with `%{conn: conn}` (an inline function secret does not receive the conn). `idp_initiated_request_url` turns this on implicitly (it is that profile's consumer). Mints no session, token, or user.",
           default: false
         ],
         warn_on_missing_identity_resource?: [

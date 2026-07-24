@@ -301,7 +301,7 @@ defmodule AshAuthentication.Strategy.OAuth2 do
           identity_resource: module | false,
           idp_initiated_login?: boolean,
           idp_initiated_request_url: secret,
-          resolve_idp_initiated_launch?: boolean,
+          resolve_idp_initiated_launch?: boolean | secret,
           name: atom,
           prevent_hijacking?: boolean,
           nonce: boolean | secret,

@@ -177,7 +177,7 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
     # (opted in via `resolve_idp_initiated_launch?`). Otherwise skip it — a
     # plain restart is byte-identical and avoids a wasted exchange.
     context =
-      if resolve_launch?(strategy) do
+      if resolve_launch?(strategy, conn) do
         idp_initiated_context(conn, strategy)
       else
         %{}
@@ -199,8 +199,39 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
     end
   end
 
-  defp resolve_launch?(strategy) do
-    strategy.resolve_idp_initiated_launch? || not is_nil(strategy.idp_initiated_request_url)
+  # Whether to run the read-only pre-exchange for *this* request. Resolved
+  # before the exchange, so it can be cheap and conn-aware:
+  #
+  #   * `resolve_idp_initiated_launch?` — a boolean, or a secret/function
+  #     resolved with `%{conn: conn}` (so the app can decide per-request, e.g.
+  #     "only when the host carries no tenant subdomain"). Truthy → pre-exchange.
+  #   * else, `idp_initiated_request_url` being set implies it (that secret is
+  #     the profile's consumer).
+  defp resolve_launch?(strategy, conn) do
+    case Map.get(strategy, :resolve_idp_initiated_launch?) do
+      value when value in [nil, false] ->
+        not is_nil(strategy.idp_initiated_request_url)
+
+      true ->
+        true
+
+      {secret_module, secret_opts} ->
+        # A `{module, opts}` secret — resolve it with `%{conn: conn}` so a
+        # context-aware module can decide per-request. Only a `Secret` module
+        # (`secret_for/4`) sees the conn; an inline function secret would not.
+        path = [:authentication, :strategies, strategy.name, :resolve_idp_initiated_launch?]
+
+        case AshAuthentication.Secret.secret_for(
+               secret_module,
+               path,
+               strategy.resource,
+               secret_opts,
+               %{conn: conn}
+             ) do
+          {:ok, value} -> !!value
+          _ -> false
+        end
+    end
   end
 
   defp idp_initiated_context(conn, strategy) do

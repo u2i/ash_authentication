@@ -229,6 +229,29 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
       assert get_session(conn, "user/oauth2_idp_initiated").state =~ ~r/.+/
     end
 
+    test "a conn-aware resolve_idp_initiated_launch? secret skips the pre-exchange per-request" do
+      import Mimic
+
+      {:ok, strategy} = Info.strategy(Example.User, :oauth2_idp_initiated)
+      # A module secret that gates on the request: this conn has no `resolve=1`
+      # param, so it returns false and the pre-exchange must NOT run.
+      strategy = %{
+        strategy
+        | resolve_idp_initiated_launch?: {__MODULE__.ResolveOnParamSecret, []}
+      }
+
+      reject(&Assent.Strategy.OAuth2.callback/3)
+
+      conn =
+        :get
+        |> conn("/user/oauth2_idp_initiated/callback", %{"code" => "abc"})
+        |> SessionPipeline.call([])
+        |> Plug.callback(strategy)
+
+      assert conn.status == 302
+      assert get_session(conn, "user/oauth2_idp_initiated").state =~ ~r/.+/
+    end
+
     test "a failed pre-exchange still restarts (unaffected fall-through)" do
       import Mimic
 
@@ -293,5 +316,17 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
       do: {:ok, "https://#{id}.example.com/auth/user/oauth2_idp_initiated"}
 
     def secret_for(_secret_name, _resource, _opts, _context), do: :error
+  end
+
+  defmodule ResolveOnParamSecret do
+    @moduledoc false
+    use AshAuthentication.Secret
+
+    # Decide per-request from the conn: pre-exchange only when `resolve=1`.
+    @impl true
+    def secret_for(_secret_name, _resource, _opts, %{conn: conn}),
+      do: {:ok, conn.params["resolve"] == "1"}
+
+    def secret_for(_secret_name, _resource, _opts, _context), do: {:ok, false}
   end
 end
