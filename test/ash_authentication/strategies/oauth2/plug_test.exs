@@ -167,5 +167,61 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
       refute conn.status == 302
       refute conn.status == 200
     end
+
+    test "the restart pre-exchanges the launch code (read-only) then redirects" do
+      import Mimic
+
+      {:ok, strategy} = Info.strategy(Example.User, :oauth2_idp_initiated)
+      user_info = %{"sub" => "person-123", "email" => "teacher@school.example"}
+      test_pid = self()
+
+      # The read-only pre-exchange runs against the launch's `code` and yields
+      # the profile the restart surfaces (as `:idp_initiated_user_info`) to the
+      # request phase's secret-resolution context — the seam a multi-tenant
+      # `authorize_url`/`redirect_uri` secret reads to route the restart at the
+      # launch's tenant. We assert the exchange happens with the inbound code.
+      stub(Assent.Strategy.OAuth2, :callback, fn _config, params ->
+        send(test_pid, {:pre_exchanged, params})
+        {:ok, %{user: user_info, token: %{"access_token" => "at"}}}
+      end)
+
+      conn =
+        :get
+        |> conn("/user/oauth2_idp_initiated/callback", %{"code" => "abc"})
+        |> SessionPipeline.call([])
+        |> Plug.callback(strategy)
+
+      # The launch code was exchanged read-only, before the restart...
+      assert_received {:pre_exchanged, %{"code" => "abc"}}
+
+      # ...and the restart still happened: a 302 into the authorize endpoint,
+      # minting a fresh `state`. No user was signed in from the inbound code.
+      assert conn.status == 302
+      assert {"location", location} = Enum.find(conn.resp_headers, &(elem(&1, 0) == "location"))
+      assert String.starts_with?(location, "https://example.com/authorize?")
+      assert get_session(conn, "user/oauth2_idp_initiated").state =~ ~r/.+/
+      refute match?({:ok, _}, conn.private[:authentication_result])
+    end
+
+    test "a failed pre-exchange still restarts (unaffected fall-through)" do
+      import Mimic
+
+      {:ok, strategy} = Info.strategy(Example.User, :oauth2_idp_initiated)
+
+      # The pre-exchange fails (code already spent, provider error, or a
+      # provider that simply cannot pre-resolve the launch). The restart must
+      # still happen — with no launch profile — so nothing regresses for a
+      # provider that neither needs nor supports pre-resolution.
+      stub(Assent.Strategy.OAuth2, :callback, fn _config, _params -> {:error, :boom} end)
+
+      conn =
+        :get
+        |> conn("/user/oauth2_idp_initiated/callback", %{"code" => "abc"})
+        |> SessionPipeline.call([])
+        |> Plug.callback(strategy)
+
+      assert conn.status == 302
+      assert get_session(conn, "user/oauth2_idp_initiated").state =~ ~r/.+/
+    end
   end
 end

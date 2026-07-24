@@ -79,7 +79,22 @@ defmodule AshAuthentication.Secret do
 
   The context paramter is either a map with the `conn` key containing the Plug.Conn
   if the secret is being retrieved in a plug, or the context of the ash action it is
-  called in
+  called in.
+
+  When an OAuth2/OIDC strategy restarts the request phase for an
+  IdP-initiated login (`idp_initiated_login?`), the context additionally
+  carries an `:idp_initiated_user_info` key: the profile fetched from the
+  launch (the same map your `register`/`sign_in` action receives as
+  `user_info`). A multi-tenant `authorize_url`/`redirect_uri` secret can read
+  it to route the restart at the launch's tenant. It is absent on every other
+  call, so match it optionally:
+
+      def secret_for([_, _, _, :authorize_url], _resource, _opts, context) do
+        case context do
+          %{idp_initiated_user_info: %{"id" => id}} -> {:ok, tenant_url(id)}
+          _ -> {:ok, @default_authorize_url}
+        end
+      end
   """
   @callback secret_for(secret_name :: [atom], Resource.t(), keyword, context :: map()) ::
               {:ok, String.t()} | :error
