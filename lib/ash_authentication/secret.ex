@@ -87,7 +87,10 @@ defmodule AshAuthentication.Secret do
   launch (the same map your `register`/`sign_in` action receives as
   `user_info`). A multi-tenant `authorize_url` / `redirect_uri` /
   `idp_initiated_request_url` secret can read it to route the restart at the
-  launch's tenant. It is absent on every other call, so match it optionally:
+  launch's tenant. It is present only when the strategy opted into the
+  read-only pre-exchange (`idp_initiated_request_url` is set, or
+  `resolve_idp_initiated_launch?` is `true`), and absent on every other call,
+  so match it optionally:
 
       def secret_for([_, _, _, :authorize_url], _resource, _opts, context) do
         case context do

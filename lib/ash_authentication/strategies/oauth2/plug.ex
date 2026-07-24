@@ -171,7 +171,17 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
   # pre-resolve, is unaffected. The restart triggers a fresh authorize → a
   # fresh single-use `code`, so the code consumed here is not reused.
   defp idp_initiated_restart(conn, strategy) do
-    context = idp_initiated_context(conn, strategy)
+    # The read-only pre-exchange (a token + profile round-trip) is only worth
+    # doing when something will consume the launch profile: a cross-host
+    # `idp_initiated_request_url`, or a same-host secret that reads context
+    # (opted in via `resolve_idp_initiated_launch?`). Otherwise skip it — a
+    # plain restart is byte-identical and avoids a wasted exchange.
+    context =
+      if resolve_launch?(strategy) do
+        idp_initiated_context(conn, strategy)
+      else
+        %{}
+      end
 
     case idp_initiated_request_url(strategy, Map.put(context, :conn, conn)) do
       {:ok, url} when is_binary(url) ->
@@ -182,10 +192,15 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
         |> send_resp(:found, "Redirecting to #{strategy.name}")
 
       _ ->
-        # Same host (or no host resolution): restart inline with the launch
-        # profile in context.
+        # Same host (or no host resolution): restart inline. When the launch was
+        # pre-resolved, its profile rides in the context for a tenant-aware
+        # `authorize_url`/`redirect_uri` secret.
         request(conn, strategy, context)
     end
+  end
+
+  defp resolve_launch?(strategy) do
+    strategy.resolve_idp_initiated_launch? || not is_nil(strategy.idp_initiated_request_url)
   end
 
   defp idp_initiated_context(conn, strategy) do

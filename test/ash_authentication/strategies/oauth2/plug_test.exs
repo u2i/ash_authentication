@@ -172,6 +172,11 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
       import Mimic
 
       {:ok, strategy} = Info.strategy(Example.User, :oauth2_idp_initiated)
+      # Opt into the read-only pre-exchange (a same-host tenant-aware secret
+      # would read the surfaced profile). Without this — and without an
+      # `idp_initiated_request_url` — the restart is a plain redirect, no
+      # exchange.
+      strategy = %{strategy | resolve_idp_initiated_launch?: true}
       user_info = %{"sub" => "person-123", "email" => "teacher@school.example"}
       test_pid = self()
 
@@ -203,10 +208,32 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
       refute match?({:ok, _}, conn.private[:authentication_result])
     end
 
+    test "without opt-in, the restart does NOT pre-exchange (no wasted round-trip)" do
+      import Mimic
+
+      {:ok, strategy} = Info.strategy(Example.User, :oauth2_idp_initiated)
+      # No `resolve_idp_initiated_launch?`, no `idp_initiated_request_url`:
+      # nothing consumes the launch profile, so the restart must be a plain
+      # redirect with zero token/profile calls.
+      reject(&Assent.Strategy.OAuth2.callback/3)
+
+      conn =
+        :get
+        |> conn("/user/oauth2_idp_initiated/callback", %{"code" => "abc"})
+        |> SessionPipeline.call([])
+        |> Plug.callback(strategy)
+
+      assert conn.status == 302
+      assert {"location", location} = Enum.find(conn.resp_headers, &(elem(&1, 0) == "location"))
+      assert String.starts_with?(location, "https://example.com/authorize?")
+      assert get_session(conn, "user/oauth2_idp_initiated").state =~ ~r/.+/
+    end
+
     test "a failed pre-exchange still restarts (unaffected fall-through)" do
       import Mimic
 
       {:ok, strategy} = Info.strategy(Example.User, :oauth2_idp_initiated)
+      strategy = %{strategy | resolve_idp_initiated_launch?: true}
 
       # The pre-exchange fails (code already spent, provider error, or a
       # provider that simply cannot pre-resolve the launch). The restart must

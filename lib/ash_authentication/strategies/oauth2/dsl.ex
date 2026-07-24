@@ -183,8 +183,14 @@ defmodule AshAuthentication.Strategy.OAuth2.Dsl do
         idp_initiated_request_url: [
           type: secret_type,
           doc:
-            "Optional, and only consulted on an `idp_initiated_login?` restart. When each tenant is served from its own host (e.g. a per-district subdomain), the restart must run *on that host* — the CSRF `state` is stored by the host that will receive the callback, so restarting on the wrong host loses it. Resolve the tenant's request-phase URL from the launch (the context carries `:idp_initiated_user_info`, the launch profile) and the plug redirects the browser there instead of restarting inline; that host then runs the normal request phase. Return `:error`/absent to restart inline (the default). #{secret_doc}",
+            "Optional, and only consulted on an `idp_initiated_login?` restart. When each tenant is served from its own host (e.g. a per-district subdomain), the restart must run *on that host* — the CSRF `state` is stored by the host that will receive the callback, so restarting on the wrong host loses it. Resolve the tenant's request-phase URL from the launch (the context carries `:idp_initiated_user_info`, the launch profile) and the plug redirects the browser there instead of restarting inline; that host then runs the normal request phase. Return `:error`/absent to restart inline (the default). Setting this implies `resolve_idp_initiated_launch?`. #{secret_doc}",
           required: false
+        ],
+        resolve_idp_initiated_launch?: [
+          type: :boolean,
+          doc:
+            "If enabled, the `idp_initiated_login?` restart first performs a **read-only** exchange of the launch's `code` and surfaces the profile to the request phase's secret-resolution context as `:idp_initiated_user_info`, so a same-host tenant-aware `authorize_url`/`redirect_uri` secret can route on it. This costs one extra token+profile round-trip on IdP-initiated launches, so it is `false` by default; enable it only when a secret actually reads the launch profile. `idp_initiated_request_url` turns this on implicitly (it is that profile's consumer). Mints no session, token, or user.",
+          default: false
         ],
         warn_on_missing_identity_resource?: [
           type: :boolean,
