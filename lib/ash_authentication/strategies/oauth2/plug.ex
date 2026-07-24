@@ -29,11 +29,20 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
   Builds a redirection URL based on the provider configuration and redirects the
   user to that endpoint.
   """
-  @spec request(Conn.t(), OAuth2.t()) :: Conn.t()
+  @spec request(Conn.t(), OAuth2.t(), map) :: Conn.t()
   # sobelow_skip ["XSS.SendResp"]
-  def request(conn, strategy) do
-    with {:ok, config} <- config_for(strategy, %{conn: conn}),
-         {:ok, config} <- maybe_add_nonce(config, strategy, %{conn: conn}),
+  def request(conn, strategy, context_extra \\ %{}) do
+    # `context_extra` is merged into the secret-resolution context, so a
+    # `redirect_uri`/`authorize_url`/etc. secret function can see more than the
+    # conn. The `idp_initiated_login?` restart uses this to surface the launch's
+    # already-fetched profile (`:idp_initiated_user_info`) — see
+    # `maybe_reflect_or_fail/2` — so a multi-tenant `authorize_url` can route to
+    # the right tenant's authorize endpoint on the restart, rather than a
+    # generic picker.
+    context = Map.merge(%{conn: conn}, context_extra)
+
+    with {:ok, config} <- config_for(strategy, context),
+         {:ok, config} <- maybe_add_nonce(config, strategy, context),
          {:ok, session_key} <- session_key(strategy),
          {:ok, %{session_params: session_params, url: url}} <-
            strategy.assent_strategy.authorize_url(config) do
@@ -111,10 +120,41 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
         render_interstitial(conn, strategy)
 
       conn.method == "GET" and strategy.idp_initiated_login? ->
-        request(conn, strategy)
+        request(conn, strategy, idp_initiated_context(conn, strategy))
 
       true ->
         store_authentication_result(conn, {:error, nil})
+    end
+  end
+
+  # The IdP-initiated restart re-enters the request phase to mint a verifiable
+  # `state`. For a *multi-tenant* provider the request phase must know which
+  # tenant to build an authorize URL for — but on an IdP-initiated launch that
+  # tenant is only knowable from the launch itself (the profile behind the
+  # `code`), which the plain restart never reads.
+  #
+  # So, read-only and best-effort, we exchange the launch's `code` and fetch
+  # the profile *here*, and surface it to the restart's secret-resolution
+  # context as `:idp_initiated_user_info`. A tenant-aware `authorize_url` (or
+  # `redirect_uri`) secret function can then route on it:
+  #
+  #     authorize_url fn _secret, %{idp_initiated_user_info: info} ->
+  #       {:ok, tenant_authorize_url(info)}
+  #     end
+  #
+  # This mints NO session/token/user — it only informs where the restart's
+  # authorize URL points. On any failure we fall through to a plain restart
+  # (empty context), so a provider that does not need this, or a launch we
+  # cannot pre-resolve, is unaffected. The restarted flow triggers a fresh
+  # authorize → a fresh single-use `code`, so the code consumed here is not
+  # reused.
+  defp idp_initiated_context(conn, strategy) do
+    with {:ok, config} <- config_for(strategy, %{conn: conn}),
+         {:ok, %{user: user_info}} <-
+           strategy.assent_strategy.callback(config, conn.params) do
+      %{idp_initiated_user_info: user_info}
+    else
+      _ -> %{}
     end
   end
 
