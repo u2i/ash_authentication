@@ -9,6 +9,7 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
   import Plug.Test
 
   alias AshAuthentication.{Info, Strategy.OAuth2.Plug}
+  alias Assent.Strategy.OAuth2, as: AssentOAuth2
 
   describe "request/2" do
     test "it builds the redirect url and redirects the user" do
@@ -185,7 +186,7 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
       # request phase's secret-resolution context — the seam a multi-tenant
       # `authorize_url`/`redirect_uri` secret reads to route the restart at the
       # launch's tenant. We assert the exchange happens with the inbound code.
-      stub(Assent.Strategy.OAuth2, :callback, fn _config, params ->
+      stub(AssentOAuth2, :callback, fn _config, params ->
         send(test_pid, {:pre_exchanged, params})
         {:ok, %{user: user_info, token: %{"access_token" => "at"}}}
       end)
@@ -215,7 +216,7 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
       # No `resolve_idp_initiated_launch?`, no `idp_initiated_request_url`:
       # nothing consumes the launch profile, so the restart must be a plain
       # redirect with zero token/profile calls.
-      reject(&Assent.Strategy.OAuth2.callback/3)
+      reject(&AssentOAuth2.callback/3)
 
       conn =
         :get
@@ -240,7 +241,7 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
         | resolve_idp_initiated_launch?: {__MODULE__.ResolveOnParamSecret, []}
       }
 
-      reject(&Assent.Strategy.OAuth2.callback/3)
+      reject(&AssentOAuth2.callback/3)
 
       conn =
         :get
@@ -262,7 +263,7 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
       # provider that simply cannot pre-resolve the launch). The restart must
       # still happen — with no launch profile — so nothing regresses for a
       # provider that neither needs nor supports pre-resolution.
-      stub(Assent.Strategy.OAuth2, :callback, fn _config, _params -> {:error, :boom} end)
+      stub(AssentOAuth2, :callback, fn _config, _params -> {:error, :boom} end)
 
       conn =
         :get
@@ -287,7 +288,7 @@ defmodule AshAuthentication.Strategy.OAuth2.PlugTest do
       # (`secret_for/4`); an inline function secret never receives context.
       strategy = %{strategy | idp_initiated_request_url: {__MODULE__.TenantRequestUrlSecret, []}}
 
-      stub(Assent.Strategy.OAuth2, :callback, fn _config, _params ->
+      stub(AssentOAuth2, :callback, fn _config, _params ->
         {:ok, %{user: user_info, token: %{"access_token" => "at"}}}
       end)
 
