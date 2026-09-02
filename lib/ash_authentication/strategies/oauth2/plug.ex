@@ -32,7 +32,7 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
   @spec request(Conn.t(), OAuth2.t()) :: Conn.t()
   # sobelow_skip ["XSS.SendResp"]
   def request(conn, strategy) do
-    with {:ok, config} <- config_for(strategy, %{conn: conn}),
+    with {:ok, config} <- assent_config(strategy, %{conn: conn}),
          {:ok, config} <- maybe_add_nonce(config, strategy, %{conn: conn}),
          {:ok, session_key} <- session_key(strategy),
          {:ok, %{session_params: session_params, url: url}} <-
@@ -56,7 +56,7 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
   @spec callback(Conn.t(), OAuth2.t()) :: Conn.t()
   def callback(conn, strategy) do
     with {:ok, session_key} <- session_key(strategy),
-         {:ok, config} <- config_for(strategy, %{conn: conn}),
+         {:ok, config} <- assent_config(strategy, %{conn: conn}),
          session_params when is_map(session_params) <- get_session(conn, session_key),
          conn <- delete_session(conn, session_key),
          config <- Keyword.put(config, :session_params, session_params),
@@ -173,7 +173,25 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
     |> Enum.reject(&is_nil(elem(&1, 1)))
   end
 
-  defp config_for(strategy, context) do
+  @doc """
+  Build the Assent config for `strategy` — the same config `request/2` and
+  `callback/2` build internally — resolving every configured secret
+  (`client_id`, `client_secret`, `authorize_url`, `redirect_uri`, ...)
+  against `context` (typically `%{conn: conn}`).
+
+  Public so an app that needs to talk to the provider outside the normal
+  request/callback cycle can call the strategy's own Assent functions with
+  a config that matches production, instead of re-deriving secret
+  resolution, redirect-URI construction, and HTTP-adapter selection by
+  hand. A hand-rolled config drifts silently: a hand-picked secret list
+  that looks sufficient (`client_id`, `client_secret`, the URLs) is quietly
+  incomplete for a `private_key_jwt` provider (Apple, some enterprise
+  IdPs), which also needs `private_key`/`private_key_id`/`team_id`. This
+  function always includes whatever the strategy actually needs. See
+  `fetch_idp_launch_profile/2` for the most common caller.
+  """
+  @spec assent_config(OAuth2.t(), map()) :: {:ok, Keyword.t()} | {:error, term()}
+  def assent_config(strategy, context) do
     config =
       strategy
       |> Map.take(@raw_config_attrs)
@@ -263,6 +281,55 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
         |> Enum.reject(&is_nil(elem(&1, 1)))
 
       {:ok, config}
+    end
+  end
+
+  @doc """
+  Read-only exchange of an inbound authorization `code` for the provider's
+  user profile — **without** verifying CSRF `state` or completing
+  authentication.
+
+  Equivalent to `assent_config/2` plus three documented Assent opt-outs
+  (`state: false`, `code_verifier: false`, an empty `session_params`)
+  around a direct call to `strategy.assent_strategy.callback/2`. The
+  opt-outs are the point — they are easy to get wrong by hand:
+  `Assent.fetch_config/2` makes `:session_params` sound optional in its
+  own docs, but `Assent.Strategy.OAuth2.callback/3` hard-requires the key
+  and raises `MissingConfigError` without it. This function encodes the
+  correct, explicit opt-outs once, so callers don't re-derive them.
+
+  For a callback that arrives with no request-phase session (an
+  IdP-initiated launch — see `idp_initiated_login?` on
+  `AshAuthentication.Strategy.OAuth2.Dsl`): a multi-tenant app can peek at
+  *who* is launching, to route the still-unverified login to the right
+  tenant's configuration or host before restarting the request phase.
+
+  Security properties:
+
+    * Read-only: nothing is minted or signed in. The `code` is consumed
+      here and never reused — the eventual restart (`request/2`) mints a
+      fresh `code`/`state`, and the real sign-in is still `state`-verified
+      as usual.
+    * The profile is provider-authenticated but **not** bound to the
+      current browser session — it may be an attacker's own account,
+      delivered via a crafted callback URL. Use it for routing only (which
+      tenant's config, which host); never to sign in, provision, or
+      authorize a user.
+    * Validate any redirect target derived from the profile against an
+      allowlist or database lookup — echoing an unvalidated profile field
+      into a redirect URL is an open-redirect primitive.
+  """
+  @spec fetch_idp_launch_profile(OAuth2.t(), Conn.t()) ::
+          {:ok, %{user: map(), token: map()}} | {:error, term()}
+  def fetch_idp_launch_profile(strategy, conn) do
+    with {:ok, config} <- assent_config(strategy, %{conn: conn}) do
+      config =
+        config
+        |> Keyword.put(:session_params, %{})
+        |> Keyword.put(:state, false)
+        |> Keyword.put(:code_verifier, false)
+
+      strategy.assent_strategy.callback(config, conn.params)
     end
   end
 
