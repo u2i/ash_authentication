@@ -134,6 +134,8 @@ defmodule AshAuthentication.MixProject do
          search_data: Spark.Docs.search_data_for(AshAuthentication.UserIdentity)},
         "documentation/topics/auto-signout.md",
         {"documentation/topics/custom-strategy.md", title: "Custom Strategies"},
+        {"documentation/topics/multi-tenant-idp-initiated-launches.md",
+         title: "Multi-Tenant IdP-Initiated Launches"},
         {"documentation/topics/policies-on-authentication-resources.md", title: "Policies"},
         "documentation/topics/testing.md",
         "documentation/topics/recovery-code-security.md",
