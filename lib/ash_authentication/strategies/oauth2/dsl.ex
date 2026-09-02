@@ -29,6 +29,8 @@ defmodule AshAuthentication.Strategy.OAuth2.Dsl do
         :client_id,
         :client_secret,
         :identity_resource,
+        :idp_initiated_request_url,
+        :resolve_idp_initiated_launch?,
         :private_key,
         :private_key_id,
         :private_key_path,
@@ -177,6 +179,24 @@ defmodule AshAuthentication.Strategy.OAuth2.Dsl do
           type: :boolean,
           doc:
             "If enabled, a callback arriving with no stored session (an IdP/third-party-initiated login, e.g. an identity provider's app-launcher or portal tile, that omits `state`) is treated as a *trigger* to restart authentication rather than completed directly. The plug discards the inbound response and redirects into the request phase, where a fresh `state` is generated and later verified — the OpenID Connect Core §4 (\"Initiating Login from a Third Party\") pattern. This keeps CSRF `state` verification intact for all flows. Only callbacks that carry no `state` parameter are restarted — one bearing `state` came from a request phase that already ran, so it fails closed rather than bouncing again. Requires the user to still have a live session at the provider so the restarted flow returns immediately. Defaults to `false` (stateless callbacks fail closed).",
+          default: false
+        ],
+        idp_initiated_request_url: [
+          type: secret_type,
+          doc:
+            "Optional, and only consulted on an `idp_initiated_login?` restart. When each tenant is served from its own host (e.g. a per-tenant subdomain), the restart must run *on that host* — the CSRF `state` is stored by the host that will receive the callback, so restarting on the wrong host loses it. Resolve the tenant's request-phase URL from the launch (the context carries `:idp_initiated_user_info`, the launch profile) and the plug redirects the browser there instead of restarting inline; that host then runs the normal request phase. Return `:error`/absent to restart inline (the default). Setting this implies `resolve_idp_initiated_launch?`. #{secret_doc}",
+          required: false
+        ],
+        resolve_idp_initiated_launch?: [
+          type:
+            {:or,
+             [
+               :boolean,
+               {:spark_function_behaviour, AshAuthentication.Secret,
+                {AshAuthentication.SecretFunction, 2}}
+             ]},
+          doc:
+            "Whether the `idp_initiated_login?` restart should first perform a **read-only** exchange of the launch's `code` and surface the profile to the request phase's secret-resolution context as `:idp_initiated_user_info`, so a same-host tenant-aware `authorize_url`/`redirect_uri` secret can route on it. This costs one extra token+profile round-trip, so it is `false` by default; enable it only when a secret actually reads the launch profile. May be a boolean, or — to decide per request (e.g. only when the host carries no tenant) — a `Secret` **module** resolved with `%{conn: conn}` (an inline function secret does not receive the conn). `idp_initiated_request_url` turns this on implicitly (it is that profile's consumer). Mints no session, token, or user.",
           default: false
         ],
         warn_on_missing_identity_resource?: [

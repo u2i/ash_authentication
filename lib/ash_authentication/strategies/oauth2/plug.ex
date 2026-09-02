@@ -29,11 +29,20 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
   Builds a redirection URL based on the provider configuration and redirects the
   user to that endpoint.
   """
-  @spec request(Conn.t(), OAuth2.t()) :: Conn.t()
+  @spec request(Conn.t(), OAuth2.t(), map) :: Conn.t()
   # sobelow_skip ["XSS.SendResp"]
-  def request(conn, strategy) do
-    with {:ok, config} <- config_for(strategy, %{conn: conn}),
-         {:ok, config} <- maybe_add_nonce(config, strategy, %{conn: conn}),
+  def request(conn, strategy, context_extra \\ %{}) do
+    # `context_extra` is merged into the secret-resolution context, so a
+    # `redirect_uri`/`authorize_url`/etc. secret function can see more than the
+    # conn. The `idp_initiated_login?` restart uses this to surface the launch's
+    # already-fetched profile (`:idp_initiated_user_info`) — see
+    # `maybe_reflect_or_fail/2` — so a multi-tenant `authorize_url` can route to
+    # the right tenant's authorize endpoint on the restart, rather than a
+    # generic picker.
+    context = Map.merge(%{conn: conn}, context_extra)
+
+    with {:ok, config} <- config_for(strategy, context),
+         {:ok, config} <- maybe_add_nonce(config, strategy, context),
          {:ok, session_key} <- session_key(strategy),
          {:ok, %{session_params: session_params, url: url}} <-
            strategy.assent_strategy.authorize_url(config) do
@@ -109,17 +118,146 @@ defmodule AshAuthentication.Strategy.OAuth2.Plug do
   #    present. If it isn't, the session could not be persisted (or was
   #    stripped), and restarting would only repeat the round trip until the
   #    browser gives up — so fail closed instead. This bounds the bounce to one,
-  #    the same job `reflected?/1` does for the interstitial.
+  #    the same job `reflected?/1` does for the interstitial. Before restarting,
+  #    we also surface the launch's profile to the restart's secret-resolution
+  #    context (`idp_initiated_context/2`, read-only and best-effort) so a
+  #    multi-tenant strategy can route the restart's authorize URL by tenant —
+  #    see that function's doc for detail.
   defp maybe_reflect_or_fail(conn, strategy) do
     cond do
       conn.method == "POST" and not reflected?(conn) ->
         render_interstitial(conn, strategy)
 
       conn.method == "GET" and strategy.idp_initiated_login? and not state_param?(conn) ->
-        request(conn, strategy)
+        idp_initiated_restart(conn, strategy)
 
       true ->
         store_authentication_result(conn, {:error, nil})
+    end
+  end
+
+  # The IdP-initiated restart re-enters the request phase to mint a verifiable
+  # `state`. For a *multi-tenant* provider the request phase must know which
+  # tenant to serve — but on an IdP-initiated launch that tenant is only
+  # knowable from the launch itself (the profile behind the `code`), which the
+  # plain restart never reads. So, read-only and best-effort, we exchange the
+  # launch's `code` and fetch the profile here, then restart with it available.
+  #
+  # Two shapes of tenant routing, depending on where the tenant lives:
+  #
+  #   * **Same host, per-tenant config.** The profile is surfaced to the
+  #     request phase's secret-resolution context as `:idp_initiated_user_info`,
+  #     so a tenant-aware `authorize_url`/`redirect_uri` secret routes on it:
+  #
+  #         authorize_url fn _secret, %{idp_initiated_user_info: info} ->
+  #           {:ok, tenant_authorize_url(info)}
+  #         end
+  #
+  #   * **Per-tenant HOST.** When each tenant lives on its own host (subdomain),
+  #     the restart must run *on that host*, because the `state` session is
+  #     stored by the host that will receive the callback (host-scoped cookies).
+  #     If the strategy resolves an `idp_initiated_request_url` secret from the
+  #     context, we redirect the browser to that host's request-phase route
+  #     instead of restarting inline; that host then runs the normal request
+  #     phase and stores `state` where the callback will read it.
+  #
+  #         idp_initiated_request_url fn _secret, %{idp_initiated_user_info: info} ->
+  #           {:ok, "https://" <> tenant_host(info) <> "/auth/user/oauth2"}
+  #         end
+  #
+  # Either way this mints NO session/token/user — the only thing derived from
+  # the untrusted code is where to restart. On any failure we fall through to a
+  # plain restart, so a provider that needs neither, or a launch we cannot
+  # pre-resolve, is unaffected. The restart triggers a fresh authorize → a
+  # fresh single-use `code`, so the code consumed here is not reused.
+  defp idp_initiated_restart(conn, strategy) do
+    # The read-only pre-exchange (a token + profile round-trip) is only worth
+    # doing when something will consume the launch profile: a cross-host
+    # `idp_initiated_request_url`, or a same-host secret that reads context
+    # (opted in via `resolve_idp_initiated_launch?`). Otherwise skip it — a
+    # plain restart is byte-identical and avoids a wasted exchange.
+    context =
+      if resolve_launch?(strategy, conn) do
+        idp_initiated_context(conn, strategy)
+      else
+        %{}
+      end
+
+    case idp_initiated_request_url(strategy, Map.put(context, :conn, conn)) do
+      {:ok, url} when is_binary(url) ->
+        # Cross-host: hand off to the resolved host's request phase, which
+        # stores `state` on the host that will receive the callback.
+        conn
+        |> put_resp_header("location", url)
+        |> send_resp(:found, "Redirecting to #{strategy.name}")
+
+      _ ->
+        # Same host (or no host resolution): restart inline. When the launch was
+        # pre-resolved, its profile rides in the context for a tenant-aware
+        # `authorize_url`/`redirect_uri` secret.
+        request(conn, strategy, context)
+    end
+  end
+
+  # Whether to run the read-only pre-exchange for *this* request. Resolved
+  # before the exchange, so it can be cheap and conn-aware:
+  #
+  #   * `resolve_idp_initiated_launch?` — a boolean, or a secret/function
+  #     resolved with `%{conn: conn}` (so the app can decide per-request, e.g.
+  #     "only when the host carries no tenant subdomain"). Truthy → pre-exchange.
+  #   * else, `idp_initiated_request_url` being set implies it (that secret is
+  #     the profile's consumer).
+  defp resolve_launch?(strategy, conn) do
+    case Map.get(strategy, :resolve_idp_initiated_launch?) do
+      value when value in [nil, false] ->
+        not is_nil(strategy.idp_initiated_request_url)
+
+      true ->
+        true
+
+      {secret_module, secret_opts} ->
+        # A `{module, opts}` secret — resolve it with `%{conn: conn}` so a
+        # context-aware module can decide per-request. Only a `Secret` module
+        # (`secret_for/4`) sees the conn; an inline function secret would not.
+        path = [:authentication, :strategies, strategy.name, :resolve_idp_initiated_launch?]
+
+        case AshAuthentication.Secret.secret_for(
+               secret_module,
+               path,
+               strategy.resource,
+               secret_opts,
+               %{conn: conn}
+             ) do
+          {:ok, value} -> !!value
+          _ -> false
+        end
+    end
+  end
+
+  defp idp_initiated_context(conn, strategy) do
+    with {:ok, config} <- config_for(strategy, %{conn: conn}),
+         {:ok, %{user: user_info}} <-
+           strategy.assent_strategy.callback(config, conn.params) do
+      %{idp_initiated_user_info: user_info}
+    else
+      _ -> %{}
+    end
+  end
+
+  # The optional `idp_initiated_request_url` secret. Absent (or non-binary) →
+  # `:none`, and the restart runs inline. Present → the request-phase URL to
+  # redirect the IdP-initiated launch to (typically the same route on the
+  # tenant's own host).
+  defp idp_initiated_request_url(strategy, context) do
+    case Map.get(strategy, :idp_initiated_request_url) do
+      nil ->
+        :none
+
+      _ ->
+        case fetch_secret(strategy, :idp_initiated_request_url, context) do
+          {:ok, url} when is_binary(url) -> {:ok, url}
+          _ -> :none
+        end
     end
   end
 
